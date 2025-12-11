@@ -15,7 +15,17 @@ from torchvision.utils import save_image
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# add support for mac mps
+
+mps_available = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+if mps_available:
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda:0")
+else:
+    device = torch.device("cpu")
+
+print(f'Using device: {device}')
 
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
@@ -23,9 +33,9 @@ results_folder.mkdir(exist_ok = True, parents = True)
 
 # constants
 
-IMAGE_AFTER_TEXT = False
+IMAGE_FIRST = False
 NUM_TRAIN_STEPS = 20_000
-SAMPLE_EVERY = 500
+SAMPLE_EVERY = 50
 
 # functions
 
@@ -82,7 +92,7 @@ class MnistDataset(Dataset):
         digit_tensor = T.PILToTensor()(pil)
         output =  tensor(labels), (digit_tensor / 255).float()
 
-        if not IMAGE_AFTER_TEXT:
+        if not IMAGE_FIRST:
             return output
 
         first, second = output
@@ -131,7 +141,7 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
         if len(one_multimodal_sample) < 2:
             continue
 
-        if IMAGE_AFTER_TEXT:
+        if IMAGE_FIRST:
             _, maybe_image, maybe_label = one_multimodal_sample
         else:
             maybe_label, maybe_image, *_ = one_multimodal_sample
