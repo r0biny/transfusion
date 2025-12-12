@@ -19,6 +19,9 @@ from tqdm import tqdm
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
+AUTO_RESUME = True
+GRAD_CLIP_NORM = 1.0
+
 # add support for mac mps
 
 mps_available = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
@@ -31,9 +34,36 @@ else:
 
 print(f'Using device: {device}')
 
-run_folder = Path(f'./run-mnist-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
+def find_latest_checkpoint():
+    run_dirs = sorted(
+        Path('.').glob('run-mnist-*'),
+        key = lambda path: path.stat().st_mtime,
+        reverse = True
+    )
 
-rmtree(run_folder / 'results', ignore_errors = True)
+    for run_dir in run_dirs:
+        ckpt_dir = run_dir / 'checkpoints'
+        checkpoints = sorted(
+            ckpt_dir.glob('step-*.pt'),
+            key = lambda path: path.stat().st_mtime,
+            reverse = True
+        )
+        if checkpoints:
+            return run_dir, checkpoints[0]
+
+    return None, None
+
+_, resume_checkpoint = (None, None)
+
+if AUTO_RESUME:
+    _, resume_checkpoint = find_latest_checkpoint()
+
+run_folder = Path(f'./run-mnist-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
+is_resuming = resume_checkpoint is not None
+
+if not is_resuming:
+    rmtree(run_folder / 'results', ignore_errors = True)
+
 results_folder = run_folder / 'results'
 results_folder.mkdir(exist_ok = True, parents = True)
 
@@ -45,7 +75,7 @@ writer = SummaryWriter(log_dir = str(run_folder / 'logs'))
 # constants
 
 IMAGE_FIRST = False
-NUM_TRAIN_STEPS = 20_000
+NUM_TRAIN_STEPS = 100_000
 SAMPLE_EVERY = 500
 CHECKPOINT_EVERY = 2_000
 
@@ -100,9 +130,10 @@ model = Transfusion(
 ema_model = model.create_ema()
 
 class MnistDataset(Dataset):
-    def __init__(self):
+    def __init__(self, train = True):
         self.mnist = torchvision.datasets.MNIST(
             './data/mnist',
+            train = train,
             download = True
         )
 
@@ -136,16 +167,45 @@ iter_dl = cycle(dataloader)
 
 optimizer = Adam(model.parameters(), lr = 3e-4)
 
+start_step = 1
+
+if is_resuming and resume_checkpoint is not None:
+    checkpoint = torch.load(resume_checkpoint, map_location = device)
+    model.load_state_dict(checkpoint['model'])
+    ema_model.load_state_dict(checkpoint['ema_model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    start_step = int(checkpoint.get('step', 0)) + 1
+
+    print(f'Resuming from {resume_checkpoint} at step {start_step - 1}')
+
+    checkpoint_device = checkpoint.get('device')
+    if checkpoint_device and checkpoint_device != str(device):
+        print(f'Checkpoint was trained on {checkpoint_device}, now loading on {device}')
+
+if start_step > NUM_TRAIN_STEPS:
+    print('Checkpoint already covers configured NUM_TRAIN_STEPS, nothing to train.')
+    writer.close()
+    raise SystemExit
+
 # train loop
 
-with tqdm(range(1, NUM_TRAIN_STEPS + 1), desc = 'training', mininterval = 1.0) as pbar:
+with tqdm(
+    range(start_step, NUM_TRAIN_STEPS + 1),
+    desc = 'training',
+    mininterval = 1.0,
+    initial = start_step - 1,
+    total = NUM_TRAIN_STEPS
+) as pbar:
     for step in pbar:
         model.train()
 
         loss = model(next(iter_dl))
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        grad_norm = torch.sqrt(sum((g.norm(2) ** 2 for g in grads))) if grads else torch.tensor(0.0, device = device)
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
 
         optimizer.step()
         optimizer.zero_grad()
@@ -157,6 +217,7 @@ with tqdm(range(1, NUM_TRAIN_STEPS + 1), desc = 'training', mininterval = 1.0) a
 
         writer.add_scalar('train/loss', loss_item, step)
         writer.add_scalar('train/lr', lr, step)
+        writer.add_scalar('train/grad_norm', float(grad_norm), step)
 
         pbar.set_postfix(loss = f'{loss_item:.3f}', lr = f'{lr:.2e}')
 
@@ -176,6 +237,7 @@ with tqdm(range(1, NUM_TRAIN_STEPS + 1), desc = 'training', mininterval = 1.0) a
                 maybe_label, maybe_image, *_ = one_multimodal_sample
 
             print(f'[debug] all maybe_label: {maybe_label}')
+            print(f'[debug] all rest token: {_}')
             filename = f'{step}.{maybe_label[1].item()}.png'
 
             save_image(
