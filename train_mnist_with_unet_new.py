@@ -31,7 +31,7 @@ else:
 
 print(f'Using device: {device}')
 
-run_folder = Path(f'./mnist-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
+run_folder = Path(f'./run-mnist-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
 
 rmtree(run_folder / 'results', ignore_errors = True)
 results_folder = run_folder / 'results'
