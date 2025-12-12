@@ -15,7 +15,14 @@ from torchvision.utils import save_image
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
+
+print(f'Using device: {device}')
 
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
