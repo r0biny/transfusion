@@ -2,6 +2,7 @@ from shutil import rmtree
 from pathlib import Path
 from datetime import datetime
 import math
+import random
 
 import torch
 from torch import tensor, nn
@@ -23,19 +24,27 @@ from transfusion_pytorch import Transfusion, print_modality_sample
 
 # constants
 
+SEED = 2026
+random.seed(SEED)
+torch.manual_seed(SEED)
+
 AUTO_RESUME = False
-GRAD_CLIP_NORM = 5.0
+GRAD_CLIP_NORM = 5.0e10
+
 
 BASE_LR = 3e-4
-WARMUP_STEPS = 1_000
-MIN_LR_MULT = 0.1
+
+# constant lr setting
+WARMUP_STEPS = 0
+MIN_LR_MULT = 1
 
 IMAGE_FIRST = False
 NUM_TRAIN_STEPS = 50_000
-SAMPLE_EVERY = 2_000
-CHECKPOINT_EVERY = 5_000
+SAMPLE_EVERY = 5_000
+CHECKPOINT_EVERY = 10_000
 
-RUN_NAME = 'run-m-upgrade'
+RUN_NAME = 'run-m-overfit'
+
 
 # add support for mac mps
 
@@ -73,7 +82,7 @@ _, resume_checkpoint = (None, None)
 if AUTO_RESUME:
     _, resume_checkpoint = find_latest_checkpoint()
 
-run_folder = Path(f'./{RUN_NAME}-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
+run_folder = Path(f'./{RUN_NAME}-{datetime.now().strftime("%m%d-%H%M")}')
 is_resuming = resume_checkpoint is not None
 
 if not is_resuming:
@@ -181,7 +190,7 @@ def collate_fn(data):
     return data
 
 dataset = MnistDataset()
-dataloader = model.create_dataloader(dataset, batch_size = 16, shuffle = True)
+dataloader = model.create_dataloader(dataset, batch_size = 32, shuffle = True)
 
 iter_dl = cycle(dataloader)
 
@@ -214,6 +223,19 @@ else:
 
 # train loop
 
+
+first_batch = next(iter_dl)
+print('Example batch:')
+for item in first_batch:
+    first, second = item
+    if IMAGE_FIRST:
+        image = first
+        label = second
+    else:
+        label = first
+        image = second
+    print(f' - label: {label}')
+
 with tqdm(
     range(start_step, NUM_TRAIN_STEPS + 1),
     desc = 'training',
@@ -224,7 +246,8 @@ with tqdm(
     for step in pbar:
         model.train()
 
-        loss = model(next(iter_dl))
+        loss = model(first_batch)
+        # loss = model(next(iter_dl))
         loss.backward()
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
