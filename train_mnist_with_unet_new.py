@@ -1,13 +1,14 @@
 from shutil import rmtree
 from pathlib import Path
 from datetime import datetime
+import math
 
 import torch
 from torch import tensor, nn
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim import Adam
+from torch.optim import AdamW, lr_scheduler
 
 from einops import rearrange
 
@@ -19,8 +20,22 @@ from tqdm import tqdm
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
-AUTO_RESUME = True
-GRAD_CLIP_NORM = 1.0
+
+# constants
+
+AUTO_RESUME = False
+GRAD_CLIP_NORM = 5.0
+
+BASE_LR = 3e-4
+WARMUP_STEPS = 1_000
+MIN_LR_MULT = 0.1
+
+IMAGE_FIRST = False
+NUM_TRAIN_STEPS = 50_000
+SAMPLE_EVERY = 2_000
+CHECKPOINT_EVERY = 5_000
+
+RUN_NAME = 'run-m-upgrade'
 
 # add support for mac mps
 
@@ -36,7 +51,7 @@ print(f'Using device: {device}')
 
 def find_latest_checkpoint():
     run_dirs = sorted(
-        Path('.').glob('run-mnist-*'),
+        Path('.').glob(f'{RUN_NAME}-*'),
         key = lambda path: path.stat().st_mtime,
         reverse = True
     )
@@ -58,7 +73,7 @@ _, resume_checkpoint = (None, None)
 if AUTO_RESUME:
     _, resume_checkpoint = find_latest_checkpoint()
 
-run_folder = Path(f'./run-mnist-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
+run_folder = Path(f'./{RUN_NAME}-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
 is_resuming = resume_checkpoint is not None
 
 if not is_resuming:
@@ -72,13 +87,6 @@ checkpoints_folder.mkdir(exist_ok = True, parents = True)
 
 writer = SummaryWriter(log_dir = str(run_folder / 'logs'))
 
-# constants
-
-IMAGE_FIRST = False
-NUM_TRAIN_STEPS = 100_000
-SAMPLE_EVERY = 500
-CHECKPOINT_EVERY = 2_000
-
 # functions
 
 def divisible_by(num, den):
@@ -90,9 +98,21 @@ def save_checkpoint(step):
         'model': model.state_dict(),
         'ema_model': ema_model.state_dict(),
         'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
         'device': str(device)
     }
     torch.save(checkpoint, checkpoints_folder / f'step-{step}.pt')
+
+def lr_lambda(step):
+
+    if WARMUP_STEPS > 0 and step <= WARMUP_STEPS:
+        return step / max(1, WARMUP_STEPS)
+
+    progress = (step - WARMUP_STEPS) / max(1, NUM_TRAIN_STEPS - WARMUP_STEPS)
+    progress = min(progress, 1.0)
+    cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+
+    return MIN_LR_MULT + (1 - MIN_LR_MULT) * cosine_decay
 
 # encoder / decoder
 
@@ -165,7 +185,8 @@ dataloader = model.create_dataloader(dataset, batch_size = 16, shuffle = True)
 
 iter_dl = cycle(dataloader)
 
-optimizer = Adam(model.parameters(), lr = 3e-4)
+optimizer = AdamW(model.parameters(), lr = BASE_LR)
+scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda = lr_lambda)
 
 start_step = 1
 
@@ -174,18 +195,22 @@ if is_resuming and resume_checkpoint is not None:
     model.load_state_dict(checkpoint['model'])
     ema_model.load_state_dict(checkpoint['ema_model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
+    if 'scheduler' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler'])
     start_step = int(checkpoint.get('step', 0)) + 1
 
     print(f'Resuming from {resume_checkpoint} at step {start_step - 1}')
 
+    if start_step > NUM_TRAIN_STEPS:
+        print('Checkpoint already covers configured NUM_TRAIN_STEPS, nothing to train.')
+        writer.close()
+        raise SystemExit
+
     checkpoint_device = checkpoint.get('device')
     if checkpoint_device and checkpoint_device != str(device):
         print(f'Checkpoint was trained on {checkpoint_device}, now loading on {device}')
-
-if start_step > NUM_TRAIN_STEPS:
-    print('Checkpoint already covers configured NUM_TRAIN_STEPS, nothing to train.')
-    writer.close()
-    raise SystemExit
+else:
+    print('Starting training from scratch')
 
 # train loop
 
@@ -202,19 +227,18 @@ with tqdm(
         loss = model(next(iter_dl))
         loss.backward()
 
-        grads = [p.grad for p in model.parameters() if p.grad is not None]
-        grad_norm = torch.sqrt(sum((g.norm(2) ** 2 for g in grads))) if grads else torch.tensor(0.0, device = device)
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
 
         optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
 
         ema_model.update()
 
         loss_item = loss.item()
-        lr = optimizer.param_groups[0]['lr']
 
+        # lr = optimizer.param_groups[0]['lr']
+        lr = scheduler.get_last_lr()[0]
         writer.add_scalar('train/loss', loss_item, step)
         writer.add_scalar('train/lr', lr, step)
         writer.add_scalar('train/grad_norm', float(grad_norm), step)
