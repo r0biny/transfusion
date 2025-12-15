@@ -3,6 +3,11 @@ results/
 run*/
 .DS_Store
 
+logs/
+results/
+checkpoints/
+
+
 # VS Code
 .vscode/
 
