@@ -82,16 +82,16 @@ if AUTO_RESUME:
     _, resume_checkpoint = find_latest_checkpoint()
 
 run_folder = Path(f'./{RUN_NAME}')
-writer = SummaryWriter(log_dir = str('logs' / run_folder))
+
+log_folder = 'logs' / run_folder
+writer = SummaryWriter(log_dir = str(log_folder))
 
 is_resuming = resume_checkpoint is not None
-if not is_resuming:
-    rmtree(run_folder / 'results', ignore_errors = True)
 
-results_folder = run_folder / 'results'
+results_folder = 'results' / run_folder
 results_folder.mkdir(exist_ok = True, parents = True)
 
-checkpoints_folder = run_folder / 'checkpoints'
+checkpoints_folder = 'checkpoints' / run_folder
 checkpoints_folder.mkdir(exist_ok = True, parents = True)
 
 
