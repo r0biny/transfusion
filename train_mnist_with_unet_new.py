@@ -43,8 +43,7 @@ NUM_TRAIN_STEPS = 50_000
 SAMPLE_EVERY = 5_000
 CHECKPOINT_EVERY = 10_000
 
-RUN_NAME = 'run-m-overfit'
-
+RUN_NAME = f'run-m-overfit-{datetime.now().strftime("%m%d-%H%M")}'
 
 # add support for mac mps
 
@@ -82,9 +81,10 @@ _, resume_checkpoint = (None, None)
 if AUTO_RESUME:
     _, resume_checkpoint = find_latest_checkpoint()
 
-run_folder = Path(f'./{RUN_NAME}-{datetime.now().strftime("%m%d-%H%M")}')
-is_resuming = resume_checkpoint is not None
+run_folder = Path(f'./{RUN_NAME}')
+writer = SummaryWriter(log_dir = str('logs' / run_folder))
 
+is_resuming = resume_checkpoint is not None
 if not is_resuming:
     rmtree(run_folder / 'results', ignore_errors = True)
 
@@ -94,7 +94,6 @@ results_folder.mkdir(exist_ok = True, parents = True)
 checkpoints_folder = run_folder / 'checkpoints'
 checkpoints_folder.mkdir(exist_ok = True, parents = True)
 
-writer = SummaryWriter(log_dir = str(run_folder / 'logs'))
 
 # functions
 
@@ -287,9 +286,18 @@ with tqdm(
             print(f'[debug] all rest token: {_}')
             filename = f'{step}.{maybe_label[1].item()}.png'
 
+            image_tensor = maybe_image[1].detach().cpu()
+
             save_image(
-                maybe_image[1].cpu(),
+                image_tensor,
                 str(results_folder / filename),
+            )
+
+            writer.add_image(
+                'samples/validaiton',
+                image_tensor,
+                global_step = step,
+                dataformats = 'CHW'
             )
 
         if divisible_by(step, CHECKPOINT_EVERY):
