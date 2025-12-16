@@ -31,6 +31,7 @@ torch.manual_seed(SEED)
 AUTO_RESUME = False
 GRAD_CLIP_NORM = 5.0e10
 
+IF_OVERFIT= False
 
 BASE_LR = 3e-4
 
@@ -43,7 +44,7 @@ NUM_TRAIN_STEPS = 50_000
 SAMPLE_EVERY = 5_000
 CHECKPOINT_EVERY = 10_000
 
-RUN_NAME = f'run-m-overfit-{datetime.now().strftime("%m%d-%H%M")}'
+RUN_NAME = f'run-mnist-{datetime.now().strftime("%m%d-%H%M")}'
 
 # add support for mac mps
 
@@ -88,8 +89,8 @@ writer = SummaryWriter(log_dir = str(log_folder))
 
 is_resuming = resume_checkpoint is not None
 
-results_folder = 'results' / run_folder
-results_folder.mkdir(exist_ok = True, parents = True)
+val_folder = 'results' / run_folder
+val_folder.mkdir(exist_ok = True, parents = True)
 
 checkpoints_folder = 'checkpoints' / run_folder
 checkpoints_folder.mkdir(exist_ok = True, parents = True)
@@ -222,18 +223,18 @@ else:
 
 # train loop
 
-
-first_batch = next(iter_dl)
-print('Example batch:')
-for item in first_batch:
-    first, second = item
-    if IMAGE_FIRST:
-        image = first
-        label = second
-    else:
-        label = first
-        image = second
-    print(f' - label: {label}')
+if IF_OVERFIT:
+    first_batch = next(iter_dl)
+    print('Overfitting on a single batch:')
+    for item in first_batch:
+        first, second = item
+        if IMAGE_FIRST:
+            image = first
+            label = second
+        else:
+            label = first
+            image = second
+        print(f' - label: {label}')
 
 with tqdm(
     range(start_step, NUM_TRAIN_STEPS + 1),
@@ -245,8 +246,10 @@ with tqdm(
     for step in pbar:
         model.train()
 
-        loss = model(first_batch)
-        # loss = model(next(iter_dl))
+        if IF_OVERFIT:
+            loss = model(first_batch)
+        else:
+            loss = model(next(iter_dl))
         loss.backward()
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
@@ -290,7 +293,7 @@ with tqdm(
 
             save_image(
                 image_tensor,
-                str(results_folder / filename),
+                str(val_folder / filename),
             )
 
             writer.add_image(
