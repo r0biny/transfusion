@@ -1,6 +1,7 @@
 from shutil import rmtree
 from pathlib import Path
 from datetime import datetime
+import json
 import math
 import random
 
@@ -22,29 +23,24 @@ from tqdm import tqdm
 from transfusion_pytorch import Transfusion, print_modality_sample
 
 
-# constants
+# configuration
+CONFIG = dict(
+    SEED = 2026,
+    AUTO_RESUME = False,
+    GRAD_CLIP_NORM = 5.0e10,
+    IF_OVERFIT = False,
+    BASE_LR = 1e-5,
+    WARMUP_STEPS = 2_000,
+    MIN_LR_MULT = 0.1,
+    NUM_TRAIN_STEPS = 50_000,
+    SAMPLE_EVERY = 2_500,
+    CHECKPOINT_EVERY = 10_000,
+    IMAGE_FIRST = False,
+    RUN_NAME = f'run-mnist-{datetime.now().strftime("%m%d-%H%M")}',
+)
 
-SEED = 2026
-random.seed(SEED)
-torch.manual_seed(SEED)
-
-AUTO_RESUME = False
-GRAD_CLIP_NORM = 5.0e10
-
-IF_OVERFIT= False
-
-BASE_LR = 3e-4
-
-# constant lr setting
-WARMUP_STEPS = 0
-MIN_LR_MULT = 1
-
-IMAGE_FIRST = False
-NUM_TRAIN_STEPS = 50_000
-SAMPLE_EVERY = 5_000
-CHECKPOINT_EVERY = 10_000
-
-RUN_NAME = f'run-mnist-{datetime.now().strftime("%m%d-%H%M")}'
+random.seed(CONFIG['SEED'])
+torch.manual_seed(CONFIG['SEED'])
 
 # add support for mac mps
 
@@ -60,13 +56,13 @@ print(f'Using device: {device}')
 
 def find_latest_checkpoint():
     run_dirs = sorted(
-        Path('.').glob(f'{RUN_NAME}-*'),
+        Path('checkpoints').glob(f"{CONFIG['RUN_NAME']}*"),
         key = lambda path: path.stat().st_mtime,
         reverse = True
     )
 
     for run_dir in run_dirs:
-        ckpt_dir = run_dir / 'checkpoints'
+        ckpt_dir = run_dir
         checkpoints = sorted(
             ckpt_dir.glob('step-*.pt'),
             key = lambda path: path.stat().st_mtime,
@@ -79,20 +75,29 @@ def find_latest_checkpoint():
 
 _, resume_checkpoint = (None, None)
 
-if AUTO_RESUME:
+if CONFIG['AUTO_RESUME']:
     _, resume_checkpoint = find_latest_checkpoint()
 
-run_folder = Path(f'./{RUN_NAME}')
+run_folder = Path(f'{CONFIG['RUN_NAME']}')
 
-log_folder = 'logs' / run_folder
+log_folder = Path('logs') / run_folder
+log_folder.mkdir(parents = True, exist_ok = True)
 writer = SummaryWriter(log_dir = str(log_folder))
+
+# save config as json to log folder
+try:
+    config_json_path = log_folder / 'config.json'
+    with open(config_json_path, 'w', encoding='utf-8') as f:
+        json.dump(CONFIG, f, indent=2, sort_keys=True)
+except Exception as e:
+    print(f'Warning: could not write config.json: {e}')
 
 is_resuming = resume_checkpoint is not None
 
-val_folder = 'results' / run_folder
+val_folder = Path('results') / run_folder
 val_folder.mkdir(exist_ok = True, parents = True)
 
-checkpoints_folder = 'checkpoints' / run_folder
+checkpoints_folder = Path('checkpoints') / run_folder
 checkpoints_folder.mkdir(exist_ok = True, parents = True)
 
 
@@ -114,14 +119,14 @@ def save_checkpoint(step):
 
 def lr_lambda(step):
 
-    if WARMUP_STEPS > 0 and step <= WARMUP_STEPS:
-        return step / max(1, WARMUP_STEPS)
+    if CONFIG['WARMUP_STEPS'] > 0 and step <= CONFIG['WARMUP_STEPS']:
+        return step / max(1, CONFIG['WARMUP_STEPS'])
 
-    progress = (step - WARMUP_STEPS) / max(1, NUM_TRAIN_STEPS - WARMUP_STEPS)
+    progress = (step - CONFIG['WARMUP_STEPS']) / max(1, CONFIG['NUM_TRAIN_STEPS'] - CONFIG['WARMUP_STEPS'])
     progress = min(progress, 1.0)
     cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
 
-    return MIN_LR_MULT + (1 - MIN_LR_MULT) * cosine_decay
+    return CONFIG['MIN_LR_MULT'] + (1 - CONFIG['MIN_LR_MULT']) * cosine_decay
 
 # encoder / decoder
 
@@ -174,7 +179,7 @@ class MnistDataset(Dataset):
         digit_tensor = T.PILToTensor()(pil)
         output =  tensor(labels), (digit_tensor / 255).float()
 
-        if not IMAGE_FIRST:
+        if not CONFIG['IMAGE_FIRST']:
             return output
 
         first, second = output
@@ -194,7 +199,7 @@ dataloader = model.create_dataloader(dataset, batch_size = 32, shuffle = True)
 
 iter_dl = cycle(dataloader)
 
-optimizer = AdamW(model.parameters(), lr = BASE_LR)
+optimizer = AdamW(model.parameters(), lr = CONFIG['BASE_LR'])
 scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda = lr_lambda)
 
 start_step = 1
@@ -210,7 +215,7 @@ if is_resuming and resume_checkpoint is not None:
 
     print(f'Resuming from {resume_checkpoint} at step {start_step - 1}')
 
-    if start_step > NUM_TRAIN_STEPS:
+    if start_step > CONFIG['NUM_TRAIN_STEPS']:
         print('Checkpoint already covers configured NUM_TRAIN_STEPS, nothing to train.')
         writer.close()
         raise SystemExit
@@ -223,12 +228,12 @@ else:
 
 # train loop
 
-if IF_OVERFIT:
+if CONFIG['IF_OVERFIT']:
     first_batch = next(iter_dl)
     print('Overfitting on a single batch:')
     for item in first_batch:
         first, second = item
-        if IMAGE_FIRST:
+        if CONFIG['IMAGE_FIRST']:
             image = first
             label = second
         else:
@@ -237,22 +242,22 @@ if IF_OVERFIT:
         print(f' - label: {label}')
 
 with tqdm(
-    range(start_step, NUM_TRAIN_STEPS + 1),
+    range(start_step, CONFIG['NUM_TRAIN_STEPS'] + 1),
     desc = 'training',
     mininterval = 1.0,
     initial = start_step - 1,
-    total = NUM_TRAIN_STEPS
+    total = CONFIG['NUM_TRAIN_STEPS']
 ) as pbar:
     for step in pbar:
         model.train()
 
-        if IF_OVERFIT:
+        if CONFIG['IF_OVERFIT']:
             loss = model(first_batch)
         else:
             loss = model(next(iter_dl))
         loss.backward()
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CONFIG['GRAD_CLIP_NORM'])
 
         optimizer.step()
         scheduler.step()
@@ -272,7 +277,7 @@ with tqdm(
 
         # eval
 
-        if divisible_by(step, SAMPLE_EVERY):
+        if divisible_by(step, CONFIG['SAMPLE_EVERY']):
             one_multimodal_sample = ema_model.sample(max_length = 384)
 
             print_modality_sample(one_multimodal_sample)
@@ -280,7 +285,7 @@ with tqdm(
             if len(one_multimodal_sample) < 2:
                 continue
 
-            if IMAGE_FIRST:
+            if CONFIG['IMAGE_FIRST']:
                 _, maybe_image, maybe_label = one_multimodal_sample
             else:
                 maybe_label, maybe_image, *_ = one_multimodal_sample
@@ -303,7 +308,7 @@ with tqdm(
                 dataformats = 'CHW'
             )
 
-        if divisible_by(step, CHECKPOINT_EVERY):
+        if divisible_by(step, CONFIG['CHECKPOINT_EVERY']):
             save_checkpoint(step)
 
 writer.close()
