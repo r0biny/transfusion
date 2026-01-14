@@ -1,12 +1,8 @@
-RUN_NAME=run-mnist-1212-1609
-NUM_STEPS=42000
-
-# python ./test_mnist_with_unet.py \
-#     --checkpoint ../checkpoints/$RUN_NAME/step-$NUM_STEPS.pt \
-#     --num-random 10 \
-#     --output-dir ../inference_results/$RUN_NAME
+RUN_NAME=run-mnist-1216-1345
+NUM_STEPS=50000
 
 python ./test_mnist_with_unet.py \
     --checkpoint ../checkpoints/$RUN_NAME/step-$NUM_STEPS.pt \
-    --digits 8 8 8 8 \
+    --num-random 10 \
+    --digits 0 0 0 0 0 0 0 0\
     --output-dir ../inference_results/$RUN_NAME
