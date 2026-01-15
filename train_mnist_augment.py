@@ -6,7 +6,8 @@ import math
 import random
 
 import torch
-from torch import tensor, nn
+from torch import tensor, nn, Tensor
+from typing import Iterable, Tuple
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -28,21 +29,23 @@ from transfusion_pytorch import Transfusion, print_modality_sample
 # configuration
 CONFIG = dict(
     SEED = 2026,
+    NUM_VAL_SAMPLES = 5,
     AUTO_RESUME = False,
-    GRAD_CLIP_NORM = 5.0e10,
+    GRAD_CLIP_NORM = 5.0,
     IF_OVERFIT = False,
     BASE_LR = 1e-3,
     WARMUP_STEPS = 2_000,
     MIN_LR_MULT = 0.1,
     NUM_TRAIN_STEPS = 50_000,
-    SAMPLE_EVERY = 2_500,
+    SAMPLE_EVERY = 20,
     CHECKPOINT_EVERY = 10_000,
     IMAGE_FIRST = False,
     NUM_TEXT_TOKENS = 128,
     SHEAR_MIN_DEG = 4.0,
     SHEAR_MAX_DEG = 20.0,
-    RUN_NAME = f'run-m-lr-{datetime.now().strftime("%m%d-%H%M")}',
+    RUN_NAME = f'mnist-sheer-{datetime.now().strftime("%m%d-%H%M")}',
 )
+
 
 random.seed(CONFIG['SEED'])
 torch.manual_seed(CONFIG['SEED'])
@@ -58,6 +61,50 @@ else:
     device = torch.device("cpu")
 
 print(f'Using device: {device}')
+
+def gen_random_prompt(num_samples: int) -> list[str]:
+    prompts = []
+    for _ in range(num_samples):
+        digit = random.randint(0, 9)
+        shear_deg = random.uniform(CONFIG['SHEAR_MIN_DEG'], CONFIG['SHEAR_MAX_DEG'])
+        direction = 'right' if random.random() > 0.5 else 'left'
+        magnitude = abs(shear_deg)
+        if magnitude < 8:
+            intensity = 'slightly'
+        elif magnitude < 14:
+            intensity = 'moderately'
+        else:
+            intensity = 'strongly'
+        prompt = f'A handwritten digit {digit} slants {intensity} to the {direction}.'
+        prompts.append(prompt)
+    return prompts
+
+def extract_first_modality(modality_sample: Iterable) -> Tuple[int | None, Tensor | None]:
+    for item in modality_sample:
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], Tensor):
+            return item
+        if isinstance(item, Tensor) and item.dtype.is_floating_point:
+            return None, item
+    return None, None
+
+
+def save_first_image(modality_sample: Iterable, output_path: Path) -> bool:
+    modality_type, image = extract_first_modality(modality_sample)
+    if image is None:
+        return False
+
+    if image.ndim == 4 and image.shape[0] == 1:
+        image = image[0]
+
+
+    # make sure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    save_image(image.detach().cpu(), output_path)
+    tag = f"modality_{modality_type}" if modality_type is not None else "modality"
+    print(f"saved {tag} to {output_path}")
+    return True
+
 
 def find_latest_checkpoint():
     run_dirs = sorted(
@@ -329,37 +376,37 @@ with tqdm(
         # eval
 
         if divisible_by(step, CONFIG['SAMPLE_EVERY']):
-            one_multimodal_sample = ema_model.sample(max_length = 384)
+            model.eval()
+            with torch.no_grad():
+                random_prompt = gen_random_prompt(num_samples = CONFIG['NUM_VAL_SAMPLES'])
+                for i, prompt in enumerate(random_prompt):
 
-            print_modality_sample(one_multimodal_sample)
+                    text_tokens = encode_text(prompt).unsqueeze(0).to(device)
+                    sample = ema_model.sample(
+                        prompt = text_tokens,
+                        max_length = 384
+                    )
+                    print_modality_sample(sample)
 
-            if len(one_multimodal_sample) < 2:
-                continue
+                    file_name = f'step-{step}-prompt-{prompt}.png'
+                    modality_type, image = extract_first_modality(sample)
+                    if image is None:
+                        print(f'[warn] no modality found for prompt: {prompt}')
+                        continue
+                    if image.ndim == 4 and image.shape[0] == 1:
+                        image = image[0]
 
-            if CONFIG['IMAGE_FIRST']:
-                _, maybe_image, maybe_label = one_multimodal_sample
-            else:
-                maybe_label, maybe_image, *_ = one_multimodal_sample
+                    save_image(
+                        image.detach().cpu(),
+                        str(val_folder / file_name)
+                    )
 
-            decoded_label = decode_text_tokens(maybe_label) if torch.is_tensor(maybe_label) else ''
-            print(f'[debug] all maybe_label: {maybe_label}')
-            print(f'[debug] decoded label: {decoded_label}')
-            print(f'[debug] all rest token: {_}')
-            filename = f'{step}.png'
-
-            image_tensor = maybe_image[1].detach().cpu()
-
-            save_image(
-                image_tensor,
-                str(val_folder / filename),
-            )
-
-            writer.add_image(
-                'samples/validaiton',
-                image_tensor,
-                global_step = step,
-                dataformats = 'CHW'
-            )
+                    writer.add_image(
+                        'samples/validaiton',
+                        image,
+                        global_step = step,
+                        dataformats = 'CHW'
+                    )
 
         if divisible_by(step, CONFIG['CHECKPOINT_EVERY']):
             save_checkpoint(step)
