@@ -62,8 +62,9 @@ else:
 
 print(f'Using device: {device}')
 
-def gen_random_prompt(num_samples: int) -> list[str]:
+def gen_random_prompts(num_samples: int) -> list[str]:
     prompts = []
+    addition_infos = []
     for _ in range(num_samples):
         digit = random.randint(0, 9)
         shear_deg = random.uniform(CONFIG['SHEAR_MIN_DEG'], CONFIG['SHEAR_MAX_DEG'])
@@ -76,8 +77,9 @@ def gen_random_prompt(num_samples: int) -> list[str]:
         else:
             intensity = 'strongly'
         prompt = f'A handwritten digit {digit} slants {intensity} to the {direction}.'
+        addition_infos.append((digit, shear_deg, direction))
         prompts.append(prompt)
-    return prompts
+    return prompts, addition_infos
 
 def extract_first_modality(modality_sample: Iterable) -> Tuple[int | None, Tensor | None]:
     for item in modality_sample:
@@ -86,7 +88,9 @@ def extract_first_modality(modality_sample: Iterable) -> Tuple[int | None, Tenso
         if isinstance(item, Tensor) and item.dtype.is_floating_point:
             return None, item
     return None, None
-
+# modality_type, image = extract_first_modality(sample)
+# if image.ndim == 4 and image.shape[0] == 1:
+#     image = image[0]
 
 def save_first_image(modality_sample: Iterable, output_path: Path) -> bool:
     modality_type, image = extract_first_modality(modality_sample)
@@ -378,8 +382,8 @@ with tqdm(
         if divisible_by(step, CONFIG['SAMPLE_EVERY']):
             model.eval()
             with torch.no_grad():
-                random_prompt = gen_random_prompt(num_samples = CONFIG['NUM_VAL_SAMPLES'])
-                for i, prompt in enumerate(random_prompt):
+                random_prompts, addition_infos = gen_random_prompts(num_samples = CONFIG['NUM_VAL_SAMPLES'])
+                for i, prompt in enumerate(random_prompts):
 
                     text_tokens = encode_text(prompt).unsqueeze(0).to(device)
                     sample = ema_model.sample(
@@ -388,22 +392,21 @@ with tqdm(
                     )
                     print_modality_sample(sample)
 
-                    file_name = f'step-{step}-prompt-{prompt}.png'
-                    modality_type, image = extract_first_modality(sample)
-                    if image is None:
-                        print(f'[warn] no modality found for prompt: {prompt}')
-                        continue
-                    if image.ndim == 4 and image.shape[0] == 1:
-                        image = image[0]
+                    file_name = f'step-{step}-prompt-{addition_infos[0]}_{addition_infos[1]}_{addition_infos[2]}.png'
+
+                    maybe_label, maybe_image, *_ = sample
+                    image_tensor = maybe_image[1].detach().cpu()
+                    # why maybe_image[1]? not maybe_image[0]?
+
 
                     save_image(
-                        image.detach().cpu(),
+                        image_tensor,
                         str(val_folder / file_name)
                     )
 
                     writer.add_image(
                         'samples/validaiton',
-                        image,
+                        image_tensor,
                         global_step = step,
                         dataformats = 'CHW'
                     )
