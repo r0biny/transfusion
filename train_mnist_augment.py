@@ -163,7 +163,7 @@ checkpoints_folder.mkdir(exist_ok = True, parents = True)
 def divisible_by(num, den):
     return (num % den) == 0
 
-def save_checkpoint(step):
+def save_checkpoint(step) -> bool:
     checkpoint = {
         'step': step,
         'model': model.state_dict(),
@@ -172,7 +172,27 @@ def save_checkpoint(step):
         'scheduler': scheduler.state_dict(),
         'device': str(device)
     }
-    torch.save(checkpoint, checkpoints_folder / f'step-{step}.pt')
+
+    ckpt_path = checkpoints_folder / f'step-{step}.pt'
+
+    try:
+        # ensure directory exists
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(checkpoint, ckpt_path)
+    except Exception as e:
+        print(f"[error] failed to save checkpoint {ckpt_path}: {e}")
+        return False
+
+    # basic sanity check: file exists and non-empty
+    try:
+        if not ckpt_path.exists() or ckpt_path.stat().st_size == 0:
+            print(f"[error] checkpoint write seems to have failed or produced empty file: {ckpt_path}")
+            return False
+    except Exception as e:
+        print(f"[warn] unable to stat checkpoint file {ckpt_path}: {e}")
+
+    print(f"saved checkpoint to {ckpt_path}")
+    return True
 
 def lr_lambda(step):
     if CONFIG['WARMUP_STEPS'] > 0 and step <= CONFIG['WARMUP_STEPS']:
@@ -391,13 +411,17 @@ with tqdm(
                         max_length = 384
                     )
                     print_modality_sample(sample)
+                    
+                    digit, shear_deg, direction = addition_infos[i]
+                    file_name = f'step-{step}-digit-{digit}-shear-{shear_deg:.2f}-{direction}.png'
 
-                    file_name = f'step-{step}-prompt-{addition_infos[0]}_{addition_infos[1]}_{addition_infos[2]}.png'
-
-                    maybe_label, maybe_image, *_ = sample
-                    image_tensor = maybe_image[1].detach().cpu()
-                    # why maybe_image[1]? not maybe_image[0]?
-
+                    modality_type, image = extract_first_modality(sample)
+                    if image is None:
+                        print(f'[warn] no modality found for prompt: {prompt}')
+                        continue
+                    if image.ndim == 4 and image.shape[0] == 1:
+                        image = image[0]
+                    image_tensor = image.detach().cpu()
 
                     save_image(
                         image_tensor,
@@ -405,13 +429,15 @@ with tqdm(
                     )
 
                     writer.add_image(
-                        'samples/validaiton',
+                        'samples/validation',
                         image_tensor,
                         global_step = step,
                         dataformats = 'CHW'
                     )
 
         if divisible_by(step, CONFIG['CHECKPOINT_EVERY']):
-            save_checkpoint(step)
+            success = save_checkpoint(step)
+            if not success:
+                print(f"[error] checkpoint save failed at step {step}")
 
 writer.close()
