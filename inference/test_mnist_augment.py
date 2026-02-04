@@ -98,45 +98,87 @@ def decode_text_tokens(tokens: Tensor) -> str:
     return "".join([chr(int(t)) for t in tokens])
 
 
-def extract_first_modality(modality_sample: Iterable) -> Tuple[int | None, Tensor | None]:
-    for item in modality_sample:
-        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], Tensor):
-            return item
-        if isinstance(item, Tensor) and item.dtype.is_floating_point:
-            return None, item
-    return None, None
+def _unwrap_transfusion_model(model: Transfusion) -> Transfusion:
+    if hasattr(model, "ema_model") and model.ema_model is not None:
+        return model.ema_model
+    if hasattr(model, "online_model"):
+        online = model.online_model
+        if isinstance(online, list) and online:
+            return online[0]
+        return online
+    return model
 
 
-def extract_text_after_first_modality(modality_sample: Iterable) -> Tensor | None:
-    seen_modality = False
-    text_chunks: list[Tensor] = []
+def decode_text_with_special(tokens: Tensor, model: Transfusion) -> str:
+    model = _unwrap_transfusion_model(model)
+    if tokens.ndim > 1:
+        tokens = tokens.flatten()
+    parts: list[str] = []
+    for tok in tokens.tolist():
+        if 0 <= tok < NUM_TEXT_TOKENS:
+            parts.append(chr(tok))
+        elif tok == model.sos_id:
+            parts.append("<SOS>")
+        elif tok == model.eos_id:
+            parts.append("<EOS>")
+        elif tok == model.meta_id:
+            parts.append("<META>")
+        elif tok in model.som_ids:
+            parts.append(f"<SOM:{model.som_ids.index(tok)}>")
+        elif tok in model.eom_ids:
+            parts.append(f"<EOM:{model.eom_ids.index(tok)}>")
+        elif tok >= model.meta_id + 1:
+            parts.append(model.decode_chars(torch.tensor([tok], device=tokens.device)))
+        else:
+            parts.append(f"<UNK:{tok}>")
+    return "".join(parts)
+
+
+def parse_sample_parts(
+    modality_sample: Iterable,
+    model: Transfusion | None = None,
+) -> list[dict]:
+    parts: list[dict] = []
     for item in modality_sample:
         if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], Tensor):
-            if not seen_modality:
-                seen_modality = True
+            parts.append(
+                {
+                    "kind": "modality",
+                    "modality_type": item[0],
+                    "tensor": item[1],
+                }
+            )
+            print(f"modality: {item[1].shape}]")
+        elif isinstance(item, Tensor) and item.dtype.is_floating_point:
+            parts.append(
+                {
+                    "kind": "modality",
+                    "modality_type": None,
+                    "tensor": item,
+                }
+            )
+            print(f"modality: {item.shape}]")
+        elif isinstance(item, Tensor) and item.dtype in (torch.int, torch.long):
+            parts.append(
+                {
+                    "kind": "text",
+                    "tensor": item,
+                }
+            )
+            decoded = decode_text_with_special(item, model)
+            print(f"text: {decoded!r}")
+    return parts
+
+
+def decode_first_image_part(parts: list[dict]) -> Tuple[int | None, Tensor | None]:
+    for part in parts:
+        if part["kind"] != "modality":
             continue
-        if isinstance(item, Tensor) and item.dtype in (torch.int, torch.long):
-            if seen_modality:
-                text_chunks.append(item)
-    if not text_chunks:
-        return None
-    return torch.cat([t.flatten() for t in text_chunks], dim=0)
-
-
-def save_first_image(modality_sample: Iterable, output_path: Path) -> bool:
-    modality_type, image = extract_first_modality(modality_sample)
-    if image is None:
-        return False
-
-    if image.ndim == 4 and image.shape[0] == 1:
-        image = image[0]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    save_image(image.detach().cpu(), output_path)
-    tag = f"modality_{modality_type}" if modality_type is not None else "modality"
-    print(f"saved {tag} to {output_path}")
-    return True
+        image = part["tensor"]
+        if image.ndim == 4 and image.shape[0] == 1:
+            image = image[0]
+        return part["modality_type"], image
+    return None, None
 
 
 def slugify_prompt(prompt: str, max_len: int = 60) -> str:
@@ -198,12 +240,9 @@ def run_prompted_sample(
         slug = slugify_prompt(prompt)
         filename = output_dir / f"{slug}_{time()}.png"
 
-        trailing_tokens = extract_text_after_first_modality(sample)
-        if trailing_tokens is not None:
-            decoded = decode_text_tokens(trailing_tokens)
-            print(f"text after modality: {decoded!r}")
+        parts = parse_sample_parts(sample, model=model)
 
-        modality_type, image = extract_first_modality(sample)
+        modality_type, image = decode_first_image_part(parts)
         if image is None:
             print(f'[warn] no modality found for prompt: {prompt}')
             continue
