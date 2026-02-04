@@ -189,17 +189,6 @@ def slugify_prompt(prompt: str, max_len: int = 60) -> str:
     return prompt[:max_len].rstrip("-")
 
 
-def load_prompts(prompt_args: list[str] | None, prompt_file: Path | None) -> list[str]:
-    prompts: list[str] = []
-    if prompt_args:
-        prompts.extend(prompt_args)
-    if prompt_file:
-        for line in prompt_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                prompts.append(line)
-    return prompts
-
 def gen_random_prompts(num_samples: int, sheer_min_deg: float, sheer_max_deg: float) -> list[str]:
     prompts = []
     addition_infos = []
@@ -234,15 +223,13 @@ def run_prompted_sample(
             max_length=max_length,
             text_temperature=text_temperature,
         )
-        print(f"prompt #{idx}: {prompt}")
+        
+        print(f"Prompt #{idx}: {prompt}")
+        
         print_modality_sample(sample)
-
-        slug = slugify_prompt(prompt)
-        filename = output_dir / f"{slug}_{time()}.png"
-
         parts = parse_sample_parts(sample, model=model)
-
         modality_type, image = decode_first_image_part(parts)
+
         if image is None:
             print(f'[warn] no modality found for prompt: {prompt}')
             continue
@@ -250,22 +237,20 @@ def run_prompted_sample(
             image = image[0]
         image_tensor = image.detach().cpu()
 
+        slug = slugify_prompt(prompt)
+        filename = output_dir / f"{slug}_{time()}.png"
         save_image(
             image_tensor,
             filename
         )
-
-        # saved = save_first_image(sample, filename)
-        # if not saved:
-            # print(f"[warn] no modality found for prompt #{idx}")
 
 
 def parse_args():
     parser = ArgumentParser(description="MNIST augmentation Transfusion inference")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to checkpoint .pt file")
     parser.add_argument("--prompt", action="append", default=None, help="Prompt text (repeatable)")
-    parser.add_argument("--prompt-file", type=Path, default=None, help="Text file with one prompt per line")
     parser.add_argument("--max-length", type=int, default=384, help="Max autoregressive length for sampling")
+    parser.add_argument("--prompt-num", type=int, default=10, help="Number of prompts to generate if none provided")
     parser.add_argument("--text-temperature", type=float, default=1.5, help="Text sampling temperature")
     parser.add_argument("--output-dir", type=Path, default=Path("inference_outputs/mnist_augment"))
     parser.add_argument("--no-ema", action="store_true", help="Use raw model weights instead of EMA if available")
@@ -279,9 +264,11 @@ def main():
     sheer_min_deg = 4.0
     sheer_max_deg = 20.0
 
-    prompts = load_prompts(args.prompt, args.prompt_file)
-    if not prompts:
-        prompts, _ = gen_random_prompts(10, sheer_min_deg, sheer_max_deg)
+    prompts = []
+    if args.prompt:
+        prompts.extend(args.prompt)
+    else:
+        prompts, _ = gen_random_prompts(args.prompt_num, sheer_min_deg, sheer_max_deg)
         
     device = select_device(args.device)
     print(f"using device: {device}")
