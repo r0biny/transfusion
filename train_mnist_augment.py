@@ -29,7 +29,7 @@ from transfusion_pytorch import Transfusion, print_modality_sample
 # configuration
 CONFIG = dict(
     SEED = 2026,
-    NUM_VAL_SAMPLES = 5,
+    NUM_VAL_SAMPLES = 1,
     AUTO_RESUME = False,
     GRAD_CLIP_NORM = 5.0,
     IF_OVERFIT = False,
@@ -37,7 +37,7 @@ CONFIG = dict(
     WARMUP_STEPS = 2_000,
     MIN_LR_MULT = 0.1,
     NUM_TRAIN_STEPS = 50_000,
-    SAMPLE_EVERY = 20,
+    SAMPLE_EVERY = 2000,
     CHECKPOINT_EVERY = 10_000,
     IMAGE_FIRST = False,
     NUM_TEXT_TOKENS = 128,
