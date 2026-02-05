@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mnist_sheer
+#SBATCH --job-name=mnist_shear
 #SBATCH --partition=cscc-gpu-p
 #SBATCH --qos=cscc-gpu-qos
 #SBATCH --nodes=1

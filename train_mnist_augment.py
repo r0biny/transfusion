@@ -43,7 +43,7 @@ CONFIG = dict(
     NUM_TEXT_TOKENS = 128,
     SHEAR_MIN_DEG = 10.0,
     SHEAR_MAX_DEG = 45.0,
-    RUN_NAME = f'mnist-sheer-{datetime.now().strftime("%m%d-%H%M")}',
+    RUN_NAME = f'mnist-shear-{datetime.now().strftime("%m%d-%H%M")}',
 )
 
 
