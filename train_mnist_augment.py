@@ -41,8 +41,8 @@ CONFIG = dict(
     CHECKPOINT_EVERY = 10_000,
     IMAGE_FIRST = False,
     NUM_TEXT_TOKENS = 128,
-    SHEAR_MIN_DEG = 4.0,
-    SHEAR_MAX_DEG = 20.0,
+    SHEAR_MIN_DEG = 10.0,
+    SHEAR_MAX_DEG = 45.0,
     RUN_NAME = f'mnist-sheer-{datetime.now().strftime("%m%d-%H%M")}',
 )
 
@@ -273,9 +273,10 @@ class MnistDataset(Dataset):
 
     def _describe_shear(self, digit, shear_deg):
         magnitude = abs(shear_deg)
-        if magnitude < 8:
+        intensity_ratio = (magnitude - self.shear_min_deg) / (self.shear_max_deg - self.shear_min_deg)
+        if intensity_ratio < 0.33:
             intensity = 'slightly'
-        elif magnitude < 14:
+        elif intensity_ratio < 0.67:
             intensity = 'moderately'
         else:
             intensity = 'strongly'
