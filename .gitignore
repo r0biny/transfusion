@@ -7,6 +7,8 @@ logs/
 *results/
 checkpoints/
 
+*.err
+*.out
 
 # VS Code
 .vscode/
