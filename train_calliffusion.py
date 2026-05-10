@@ -28,8 +28,10 @@ python train_calliffusion.py \
   --ema_beta 0.99 \
   --sample_every 1000 \
   --sample_count 8 \
+  --validation_loss_every 1000 \
+  --val_batch_size 8 \
   --modality_steps 16 \
-  --checkpoint_every 2000 \
+  --checkpoint_every 5000 \
   --output_root ~/Code/transfusion/output
 """
 
@@ -40,6 +42,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -356,6 +359,14 @@ def build_image_prompt(model: Transfusion, caption_tokens: torch.Tensor, latent_
     ]
 
 
+def save_validation_prompts(dataset: CalliffusionCsvDataset, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for idx, (row, caption) in enumerate(zip(dataset.rows, dataset.captions)):
+            rel_path = normalize_rel_path(row.get(dataset.image_column, row.get("path", "")))
+            handle.write(f"{idx}\t{rel_path}\t{caption}\n")
+
+
 @torch.no_grad()
 def save_validation_samples(
     model: Transfusion,
@@ -367,11 +378,11 @@ def save_validation_samples(
     latent_shape: Tuple[int, int],
     modality_steps: int,
 ) -> None:
+    was_training = model.training
     model.eval()
     samples_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    captions = []
     for idx in range(min(max_samples, len(dataset))):
         caption_tokens, target = dataset[idx]
         prompt = build_image_prompt(model, caption_tokens, latent_shape)
@@ -393,17 +404,17 @@ def save_validation_samples(
             continue
 
         rows.extend([target.cpu(), generated])
-        captions.append(f"{idx}: {dataset.captions[idx]}")
 
     if not rows:
         logging.warning("No validation samples were generated at step %s.", step)
+        if was_training:
+            model.train()
         return
 
     grid = torch.stack(rows)
     save_image(grid, samples_dir / f"step_{step:06d}.png", nrow=2)
-
-    with (samples_dir / f"step_{step:06d}.txt").open("w", encoding="utf-8") as handle:
-        handle.write("\n".join(captions))
+    if was_training:
+        model.train()
 
 
 def save_checkpoint(
@@ -429,7 +440,61 @@ def save_checkpoint(
     if ema_model is not None:
         checkpoint["ema"] = ema_model.state_dict()
 
-    accelerator.save(checkpoint, checkpoint_dir / f"step_{step:06d}.pt")
+    checkpoint_path = checkpoint_dir / f"step_{step:06d}.pt"
+    accelerator.save(checkpoint, checkpoint_path)
+
+    latest_path = checkpoint_dir / "latest_checkpoint.txt"
+    latest_path.write_text(str(checkpoint_path), encoding="utf-8")
+    return checkpoint_path
+
+
+def checkpoint_step(checkpoint_path: Path) -> int:
+    match = re.search(r"step_(\d+)\.pt$", checkpoint_path.name)
+    return int(match.group(1)) if match else -1
+
+
+def find_latest_checkpoint(path: Path) -> Path:
+    path = path.expanduser()
+
+    if path.is_file():
+        return path
+
+    search_root = path
+    candidates = []
+
+    if path.is_dir():
+        candidates.extend(path.glob("step_*.pt"))
+        candidates.extend(path.glob("checkpoints/step_*.pt"))
+        candidates.extend(path.glob("*/checkpoints/step_*.pt"))
+        candidates.extend(path.glob("calliffusion_transfusion/*/checkpoints/step_*.pt"))
+
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoint matching step_*.pt found under {search_root}.")
+
+    return max(candidates, key=lambda candidate: (checkpoint_step(candidate), candidate.stat().st_mtime))
+
+
+@torch.no_grad()
+def compute_validation_loss(model, dataloader, accelerator, max_batches: int = 0) -> float:
+    was_training = model.training
+    model.eval()
+
+    losses = []
+    for batch_idx, batch in enumerate(dataloader):
+        if max_batches > 0 and batch_idx >= max_batches:
+            break
+
+        loss = model(batch)
+        gathered = accelerator.gather_for_metrics(loss.detach().reshape(1))
+        losses.append(gathered.float().cpu())
+
+    if was_training:
+        model.train()
+
+    if not losses:
+        return float("nan")
+
+    return torch.cat(losses).mean().item()
 
 
 def resolve_args() -> argparse.Namespace:
@@ -463,6 +528,7 @@ def resolve_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=3000)
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--train_batch_size", type=int, default=256)
+    parser.add_argument("--val_batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
@@ -474,10 +540,12 @@ def resolve_args() -> argparse.Namespace:
     parser.add_argument("--ema_beta", type=float, default=0.99)
     parser.add_argument("--sample_every", type=int, default=1000)
     parser.add_argument("--sample_count", type=int, default=8)
+    parser.add_argument("--validation_loss_every", type=int, default=1000)
+    parser.add_argument("--validation_loss_batches", type=int, default=0)
     parser.add_argument("--modality_steps", type=int, default=16)
     parser.add_argument("--checkpoint_every", type=int, default=2000)
     parser.add_argument("--output_root", default="./output")
-    parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument("--resume_checkpoint", default=None, help="Path to a checkpoint, a run directory, an output root, or 'latest'.")
     parser.add_argument("--preview_captions", type=int, default=0)
     parser.add_argument("--preview_csvs", nargs="*", default=None)
 
@@ -509,9 +577,11 @@ def main() -> None:
     set_seed(args.seed)
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    output_root = Path(args.output_root).expanduser() / "calliffusion_transfusion" / run_id
+    output_base = Path(args.output_root).expanduser()
+    output_root = output_base / "calliffusion_transfusion" / run_id
     samples_dir = output_root / "samples"
     checkpoints_dir = output_root / "checkpoints"
+    tensorboard_dir = output_root / "tensorboard"
 
     transform = Compose(
         [
@@ -562,16 +632,20 @@ def main() -> None:
         return
 
     from accelerate import Accelerator
+    from torch.utils.tensorboard import SummaryWriter
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
     )
 
+    writer = None
     if accelerator.is_main_process:
         output_root.mkdir(parents=True, exist_ok=True)
         with (output_root / "args.json").open("w", encoding="utf-8") as handle:
             json.dump({key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}, handle, ensure_ascii=False, indent=2)
+        save_validation_prompts(val_dataset, output_root / "validation.txt")
+        writer = SummaryWriter(log_dir=str(tensorboard_dir))
 
     model = build_model(args)
     ema_model = model.create_ema(beta=args.ema_beta) if args.ema_beta > 0.0 else None
@@ -580,13 +654,17 @@ def main() -> None:
     start_epoch = 0
     global_step = 0
     if args.resume_checkpoint:
-        checkpoint = torch.load(args.resume_checkpoint, map_location="cpu")
+        resume_path = find_latest_checkpoint(output_base if args.resume_checkpoint == "latest" else Path(args.resume_checkpoint).expanduser())
+        logging.info("Loading checkpoint from %s", resume_path)
+        checkpoint = torch.load(resume_path, map_location="cpu")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         if ema_model is not None and "ema" in checkpoint:
             ema_model.load_state_dict(checkpoint["ema"])
-        start_epoch = checkpoint.get("epoch", 0)
+        start_epoch = checkpoint.get("epoch", -1) + 1
         global_step = checkpoint.get("step", 0)
+        if accelerator.is_main_process:
+            (output_root / "resumed_from.txt").write_text(str(resume_path), encoding="utf-8")
 
     train_dataloader = model.create_dataloader(
         train_dataset,
@@ -597,7 +675,16 @@ def main() -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
+    val_dataloader = model.create_dataloader(
+        val_dataset,
+        batch_size=args.val_batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(model, optimizer, train_dataloader, val_dataloader)
 
     if ema_model is not None:
         ema_model.to(accelerator.device)
@@ -608,14 +695,19 @@ def main() -> None:
         logging.info("Training rows: %s; validation rows: %s", len(train_dataset), len(val_dataset))
         logging.info("Caption template: %s", args.caption_template)
         logging.info("Example caption: %s", train_dataset.captions[0])
+        if start_epoch >= args.epochs:
+            logging.warning("start_epoch=%s is not smaller than epochs=%s; no additional training epochs will run unless --epochs is increased.", start_epoch, args.epochs)
 
     stop_training = False
+    last_epoch = start_epoch - 1
     for epoch in range(start_epoch, args.epochs):
+        last_epoch = epoch
         model.train()
         progress = tqdm(train_dataloader, disable=not accelerator.is_local_main_process)
         progress.set_description(f"epoch {epoch}")
 
         for batch in progress:
+            grad_norm = None
             with accelerator.accumulate(model):
                 loss = model(
                     batch,
@@ -624,7 +716,7 @@ def main() -> None:
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
                 optimizer.step()
                 optimizer.zero_grad()
@@ -635,6 +727,23 @@ def main() -> None:
                     ema_model.update()
 
                 progress.set_postfix(loss=f"{loss.item():.4f}", step=global_step)
+
+                if accelerator.is_main_process and writer is not None:
+                    writer.add_scalar("train/loss", loss.detach().float().item(), global_step)
+                    writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
+                    writer.add_scalar("train/epoch", epoch, global_step)
+                    if grad_norm is not None:
+                        grad_norm_value = grad_norm.detach().float().item() if torch.is_tensor(grad_norm) else float(grad_norm)
+                        writer.add_scalar("train/grad_norm", grad_norm_value, global_step)
+
+                if args.validation_loss_every > 0 and global_step % args.validation_loss_every == 0:
+                    accelerator.wait_for_everyone()
+                    val_loss = compute_validation_loss(model, val_dataloader, accelerator, max_batches=args.validation_loss_batches)
+                    if accelerator.is_main_process:
+                        logging.info("step %s validation_loss %.6f", global_step, val_loss)
+                        if writer is not None:
+                            writer.add_scalar("validation/loss", val_loss, global_step)
+                            writer.flush()
 
                 if args.sample_every > 0 and global_step % args.sample_every == 0:
                     accelerator.wait_for_everyone()
@@ -653,7 +762,7 @@ def main() -> None:
                 if args.checkpoint_every > 0 and global_step % args.checkpoint_every == 0:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        save_checkpoint(
+                        checkpoint_path = save_checkpoint(
                             accelerator,
                             model,
                             ema_model,
@@ -663,6 +772,10 @@ def main() -> None:
                             step=global_step,
                             args=args,
                         )
+                        logging.info("Saved checkpoint to %s", checkpoint_path)
+                        if writer is not None:
+                            writer.add_text("checkpoint/latest", str(checkpoint_path), global_step)
+                            writer.flush()
 
                 if args.max_steps is not None and global_step >= args.max_steps:
                     stop_training = True
@@ -673,16 +786,19 @@ def main() -> None:
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        save_checkpoint(
+        checkpoint_path = save_checkpoint(
             accelerator,
             model,
             ema_model,
             optimizer,
             checkpoints_dir,
-            epoch=epoch,
+            epoch=last_epoch,
             step=global_step,
             args=args,
         )
+        logging.info("Saved final checkpoint to %s", checkpoint_path)
+        if writer is not None:
+            writer.close()
 
 
 if __name__ == "__main__":

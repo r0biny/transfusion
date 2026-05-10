@@ -17,6 +17,8 @@ PROJECT_ROOT="${PROJECT_ROOT:-$HOME/Code/transfusion}"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/Code/calligraphy_project}"
 RES_REPO="${RES_REPO:-$HOME/Code/transfusion_results}"
 VAE_MODEL="${VAE_MODEL:-stabilityai/sd-vae-ft-mse}"
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+EPOCHS="${EPOCHS:-3000}"
 
 TRAIN_CSV="${TRAIN_CSV:-${DATASET_ROOT}/dataset/train_260402.csv}"
 VAL_CSV="${VAL_CSV:-${DATASET_ROOT}/dataset/validation.csv}"
@@ -27,6 +29,11 @@ source /apps/local/conda_init.sh
 conda activate tf
 
 cd "${PROJECT_ROOT}"
+
+RESUME_ARGS=()
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+  RESUME_ARGS=(--resume_checkpoint "${RESUME_CHECKPOINT}")
+fi
 
 python -u train_calliffusion.py \
   --dataset_root "${DATASET_ROOT}" \
@@ -50,10 +57,13 @@ python -u train_calliffusion.py \
   --max_grad_norm 0.5 \
   --mixed_precision bf16 \
   --num_workers 8 \
-  --epochs 3000 \
+  --epochs "${EPOCHS}" \
   --ema_beta 0.99 \
   --sample_every 1000 \
   --sample_count 8 \
+  --validation_loss_every 1000 \
+  --val_batch_size 8 \
   --modality_steps 16 \
-  --checkpoint_every 2000 \
-  --output_root "${RES_REPO}"
+  --checkpoint_every 5000 \
+  --output_root "${RES_REPO}" \
+  "${RESUME_ARGS[@]}"
