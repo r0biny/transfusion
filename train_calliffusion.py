@@ -656,6 +656,7 @@ def main() -> None:
     if args.resume_checkpoint:
         resume_path = find_latest_checkpoint(output_base if args.resume_checkpoint == "latest" else Path(args.resume_checkpoint).expanduser())
         logging.info("Loading checkpoint from %s", resume_path)
+        torch.serialization.add_safe_globals([Path])
         checkpoint = torch.load(resume_path, map_location="cpu")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
